@@ -1,0 +1,593 @@
+---
+title: "Air France"
+output:
+  html_document:
+    toc: true
+  word_document: default
+  pdf_document: default
+---
+
+Install and load packages
+```{r message = FALSE}
+#install.packages("maps")
+#install.packages("dplyr")
+#install.packages("pastecs")
+library(maps)
+library(dplyr)
+library(pastecs)
+library(rpart)
+library(rpart.plot)
+library(ROCR)
+library(caret)
+```
+
+***
+
+# 1. Understanding the data
+
+#### 1.1 Import data
+Enter path of file
+```{r}
+library(readxl)
+AFc <- read_excel("Air France Case Spreadsheet Supplement.xls", 
+    sheet = "DoubleClick")
+#View(AFc)
+```
+AFc stands vor "Air France clean"
+
+#### 1.2 Preparing data set
+
+**Set new column names** <br />
+Easier to understand and makes use of $ annotation possible <br />
+[Note: Assumption that "Amount" column represents ticket revenue generated for Air France]
+```{r}
+colnames(AFc) <- c("publisher_id", "publisher_name", "keyword_id", "keyword", "match_type", "campaign", "keyword_group", "category", "bid_strategy", "keyword_type", "status", "search_engine_bid", "clicks", "click_charges", "avg_cost_per_click", "impressions", "engine_click_thru_perc", "avg_pos", "trans_conv_perc", "total_cost_per_trans", "revenue", "total_cost", "total_volume_of_bookings")
+
+```
+
+**Adding variable: revenue per booking** <br />
+Revenue in Euro that is generated per booking based on the keyword (observation)
+```{r}
+AFc <- transform(AFc, new = AFc$revenue / AFc$total_volume_of_bookings)
+colnames(AFc)[24] <- "revenue_per_booking"
+```
+
+**Adding variable: cost per revenue** <br />
+Showing which percentage of the revenue is spent on search engine advertising per keyword (observation)
+```{r}
+AFc <- transform(AFc, new = AFc$total_cost_per_trans / AFc$revenue_per_booking)
+colnames(AFc)[25] <- "cost_per_revenue"
+```
+
+**Adding variable: revenue per 1 dollar spent** <br />
+Showing how much revenue is generated per each dollar invested in search engine advertising
+```{r}
+AFc <- transform(AFc, new = 1 / AFc$cost_per_revenue)
+colnames(AFc)[26] <- "revenue_per_1_dollar_spent"
+```
+
+**Clean bid strategy variable** <br />
+Correct minor differences in spelling in bid strategy variable
+```{r}
+AFc$bid_strategy[AFc$bid_strategy == "Postiion 1-4 Bid Strategy"] <- "Position 1-4 Bid Strategy"
+AFc$bid_strategy[AFc$bid_strategy == "Position 1 -2 Target"] <- "Position 1-2 Target"
+```
+
+**Manual correction** <br />
+For an unknown reason, the value in row 338 and column "revenue_per_1_dollar_spent" is set to infinity as part of a calculation. Other values with the same properties are correctly set to NaN. Therefore, AFc[338,"revenue_per_1_dollar_spent"] is manually changed to NaN.
+```{r}
+AFc[338,"revenue_per_1_dollar_spent"] <- NaN
+```
+
+
+When looking at advertising data, campaigns are a key categorization. Therefore, getting an overview which campaigns are in the data set.
+```{r}
+table(AFc$campaign)
+```
+
+***
+
+# 2. & 3. Massaging the data & descriptive statistics
+
+## Are branded keywords bringing more revenue?
+Some of the keywords include any kind of variation of the airline's name. The first question to be answered is whether the branded keywords deliver better results in terms of revenue generated per invested marketing dollar.
+
+#### 1. Subset branded keywords
+Iterating in two for loops over all rows and using all branded keywords provided in a vector. If statement within the loops adds TRUE or FALSE to newly created branded_keyword column. Afterwards subsetting data set into one with branded keywords and one with UNbranded keywords.
+```{r}
+branded_keywords <- c("air france", "airfrance")
+
+for (i in 1:nrow(AFc)){
+  for (j in branded_keywords){
+    if (grepl(j, AFc[i,"keyword"], ignore.case = TRUE) == TRUE){
+      AFc[i,"branded_keyword"] <- TRUE
+      break} else {
+        AFc[i,"branded_keyword"] <- FALSE
+      }
+  }
+}
+
+AFc_brandedkeywords <- AFc[which(AFc$branded_keyword == TRUE),]
+
+AFc_unbrandedkeywords <- AFc[-which(AFc$branded_keyword == TRUE),]
+
+```
+
+#### 2. Check performance of subset dataframes with branded keywords vs unbranded keywords
+
+##### 2.1. Performance in revenue per 1 dollar advertising spent
+
+**Descriptive statistics on revenue per invested advertising dollar:** <br />
+Branded keywords:
+```{r}
+stat.desc(AFc_brandedkeywords$revenue_per_1_dollar_spent)
+```
+
+Unbranded keywords:
+```{r}
+stat.desc(AFc_unbrandedkeywords$revenue_per_1_dollar_spent)
+```
+Analysis shows that mean revenue generated from one advertising dollar for branded keywords is higher at \$69.00 compared to $49.01 for unbranded keywords. However, when the standard deviation is considered, the difference between the two numbers is not statistically significant.
+
+##### 2.2 Analyze average position
+
+**Descriptive statistics on average position:** <br />
+Branded keywords:
+```{r}
+stat.desc(AFc_brandedkeywords$avg_pos)
+```
+
+Unbranded keywords:
+```{r}
+stat.desc(AFc_unbrandedkeywords$avg_pos)
+```
+Analysis shows that the average position on search engine ads of branded keywords is better (lower) at 1.59 compared to 1.95 for unbranded keywords. Results are statistically significant!
+
+
+#### 2.3. Performance on click-through rate [%]
+The hypothesis is that unbranded keywords produce a higher click-through rate [%] because users are just browsing the web and want to explore their travel options when using unbranded keywords?
+
+**Descriptive statistics on click-through rate [%]:** <br />
+Branded keywords:
+```{r}
+stat.desc(AFc_brandedkeywords$engine_click_thru_perc)
+```
+
+Unbranded keywords:
+```{r}
+stat.desc(AFc_unbrandedkeywords$engine_click_thru_perc)
+```
+Analysis shows that the average click-through rate of branded keywords at 1.81% is higher than the 1.06% click-through rate of unbranded keywords. However, when the standard deviation is considered, the difference between the two percentages is not statistically significant.
+
+
+#### 2.4. Performance on transaction conversion rate [%]
+
+**Descriptive statistics on transaction conversion rate [%]:** <br />
+Branded keywords:
+```{r}
+stat.desc(AFc_brandedkeywords$trans_conv_perc)
+```
+
+Unbranded keywords:
+```{r}
+stat.desc(AFc_unbrandedkeywords$trans_conv_perc)
+```
+Analysis shows that the average transaction conversion rate of branded keywords at 0.83% is higher than the 0.55% transaction conversion rate of unbranded keywords. However, when the standard deviation is considered, the difference between the two percentages is not statistically significant.
+
+***
+
+## Are ticket-focused keywords (including "ticket", "fare", "flight") more profitable than other keywords?
+
+#### 1. Subset ticket keywords
+Testing whether the revenue generated per dollar spent on advertising is higher for ticket-focused keywords. The rationale is to understand whether customers in their digital journey first search for broader keywords and only look for ticket-specific keywords when they made the decision to travel and are looking for conrete tickets (and are willing to spend money).
+Iterating in two for loops over all rows and using all ticket-related keywords provided in a vector. If statement within the loops adds TRUE or FALSE to newly created ticket_keyword column. Afterwards subsetting data set into one with ticket-focused keywords and one with non-ticket-focused keywords.
+
+```{r}
+ticket_keywords <- c("ticket", "fare", "flight") 
+
+for (i in 1:nrow(AFc)){
+  for (j in ticket_keywords){
+    if (grepl(j, AFc[i,"keyword"], ignore.case = TRUE) == TRUE){
+      AFc[i,"ticket_keyword"] <- TRUE
+      break} else {
+        AFc[i,"ticket_keyword"] <- FALSE
+      }
+  }
+}
+
+AFc_ticketkeywords <- AFc[which(AFc$ticket_keyword == TRUE),]
+
+AFc_nonticketkeywords <- AFc[-which(AFc$ticket_keyword == TRUE),]
+```
+
+#### 2. Check performance of subset dataframes with ticket-focused keywords vs non-ticket-focused keywords
+
+##### 2.1. Performance in revenue per 1 dollar advertising spent
+
+**Descriptive statistics on revenue per invested advertising dollar:** <br />
+Ticket-focused keywords:
+```{r}
+stat.desc(AFc_ticketkeywords$revenue_per_1_dollar_spent)
+```
+
+Non-ticket-focused keywords:
+```{r}
+stat.desc(AFc_nonticketkeywords$revenue_per_1_dollar_spent)
+```
+Analysis shows that mean revenue generated from one advertising dollar for non-ticket-focused keywords is higher at \$73.39 compared to $38.78 for ticket-focused keywords. However, when the standard deviation is considered, the difference between the two numbers is not statistically significant.
+# This finding suggests that xxxx
+<br /> 
+
+#### 2.2. Performance on average position
+
+**Descriptive statistics on average position:** <br />
+Ticket-focused keywords:
+```{r}
+stat.desc(AFc_ticketkeywords$avg_pos)
+```
+
+Non-Ticket-focused keywords:
+```{r}
+stat.desc(AFc_nonticketkeywords$avg_pos)
+```
+Analysis shows that average position for ticket-focused keywords is slightly lower (better) at 1.92 compared to 1.94 for non-ticket-focused keywords. However, when the standard deviation is considered, the difference between the two numbers is not statistically significant.
+
+***
+
+## Are destination-focused keywords (with city name or country name (except France)) more profitable than other keywords?
+
+#### 1. Get destination-focused keywords
+using the world.cities data set out of the maps package to get a list of cities and countries (including other information such as the population). As the data set also includes small and irrelevant cities, the data set is subset to include only cities with a population higher than specified in the code. 
+Then converting to a dataframe and changing the column label to "col1" which is needed to append the list of country names (with rbind function). Excluding the country France from the dataframe because it is more often used in combination with "Air France" than as a reference to the country France. Finally, changing the format to a vector. 
+```{r}
+data(world.cities)
+world.cities_sub <- subset(world.cities, pop > 350000)
+cities <- as.data.frame(world.cities_sub[,"name"])
+colnames(cities) <- "col1"
+countries <- as.data.frame(unique(world.cities[,"country.etc"]))
+colnames(countries) <- "col1"
+citiescountries_df <- rbind(cities, countries)
+citiescountries_df <- subset(citiescountries_df, col1 != "France")
+citiescountries_vec <- citiescountries_df[["col1"]]
+
+```
+
+
+#### 2. Subset with destination keywords
+Iterating in two for loops over all rows and using all destination-related keywords provided in a vector. If statement within the loops adds TRUE or FALSE to newly created destination_keyword column. Afterwards subsetting data set into one with destination-focused keywords and one with non-destination-focused keywords.
+[NOTE: This chunk takes quite a while to caculate. Hang in a few minutes]
+
+```{r}
+AFc$destination_keyword <- FALSE
+
+for (k in 1:nrow(AFc)){
+  for (m in 1:nrow(citiescountries_df)){
+    if(grepl(citiescountries_df[m,1], AFc[k,"keyword"], ignore.case = TRUE) == TRUE){
+      AFc[k,"destination_keyword"] <- TRUE
+    }
+  }
+}
+
+
+AFc_destinationkeywords <- AFc[which(AFc$destination_keyword == TRUE),]
+
+AFc_nondestinationkeywords <- AFc[-which(AFc$destination_keyword == TRUE),]
+```
+
+#### 3. Check performance of subset dataframes with destination-focused keywords vs non-destination-focused keywords
+
+##### 3.1. Performance in revenue per 1 dollar advertising spent
+Testing whether the revenue generated per dollar spent on advertising is higher for destination-focused keywords. The rationale is to understand whether customers in their digital journey are more willing to spend money on flights when they are looking for specific cities or countries they want to travel to. 
+
+**Descriptive statistics on revenue per invested advertising dollar:** <br />
+Destination-focused keywords:
+```{r}
+stat.desc(AFc_destinationkeywords$revenue_per_1_dollar_spent)
+```
+Non-destination-focused keywords:
+```{r}
+stat.desc(AFc_nondestinationkeywords$revenue_per_1_dollar_spent)
+```
+Analysis shows that mean revenue generated from one advertising dollar for destination-focused keywords is lower at \$45.84 compared to $60.52 for non-destination-focused keywords. However, when the standard deviation is considered, the difference between the two numbers is not statistically significant.
+
+
+##### 3.2 Analyze average position
+
+**Descriptive statistics on average position:** <br />
+Destination-focused keywords:
+```{r}
+stat.desc(AFc_destinationkeywords$avg_pos)
+```
+
+Non-destination-focused keywords:
+```{r}
+stat.desc(AFc_nondestinationkeywords$avg_pos)
+```
+Analysis shows that the average position on search engine ads of destination-focused keywords is better (lower) at 1.88 compared to 1.99 for non-destination-focused keywords. Results are statistically significant!
+
+#### 3.3. Performance on click-through rate [%]
+The hypothesis is that destination-focused keywords produce a higher click-through rate [%] because users have a clearer goal of what they are searching for and are thereofore more willing to click on ads that give them the information they are looking for. 
+
+**Descriptive statistics on click-through rate [%]:** <br />
+Destination-focused keywords:
+```{r}
+stat.desc(AFc_destinationkeywords$engine_click_thru_perc)
+```
+
+Non-destination-focused keywords:
+```{r}
+stat.desc(AFc_nondestinationkeywords$engine_click_thru_perc)
+```
+Analysis shows that the average click-through rate of destination-focused keywords at 12.40% is higher than the 9.57% click-through rate of non-destination keywords. The difference is statistically significant!
+
+#### 3.4. Performance on transaction conversion rate [%]
+
+**Descriptive statistics on transaction conversion rate [%]:** <br />
+Destination-focused keywords:
+```{r}
+stat.desc(AFc_destinationkeywords$trans_conv_perc)
+```
+
+Non-destination-focused keywords:
+```{r}
+stat.desc(AFc_nondestinationkeywords$trans_conv_perc)
+```
+Analysis shows that the average transaction conversion rate of destination-focused keywords at 0.59% is higher than the 0.54% transaction conversion rate of non-destination-focused keywords. The results are not statistically significant. 
+
+***
+
+## Are bargain-focused keywords (including "discount", "cheap", "sale") less profitable than other keywords?
+The rational is that users with a clear intention to travel and a plan where to go start searching for the cheapest fares to get to their destination. This would imply that the revenue generated and other ratios should be higher for bargain-focused keywords. 
+
+#### 1. Subset with destination keywords
+Iterating in two for loops over all rows and using all bargain-related keywords provided in a vector. If statement within the loops adds TRUE or FALSE to newly created bargain_keyword column. Afterwards subsetting data set into one with bargain-focused keywords and one with non-bargain-focused keywords.
+
+```{r}
+bargain_keywords <- c("discount", "cheap", "sale") 
+
+for (i in 1:nrow(AFc)){
+  for (j in bargain_keywords){
+    if (grepl(j, AFc[i,"keyword"], ignore.case = TRUE) == TRUE){
+      AFc[i,"bargain_keyword"] <- TRUE
+      break} else {
+        AFc[i,"bargain_keyword"] <- FALSE
+      }
+  }
+}
+
+AFc_bargainkeywords <- AFc[which(AFc$bargain_keyword == TRUE),]
+
+AFc_nonbargainkeywords <- AFc[-which(AFc$bargain_keyword == TRUE),]
+
+```
+#### 2. Check performance of subset dataframes with bargain-focused keywords vs non-bargain-focused keywords
+
+##### 3.1. Performance in revenue per 1 dollar advertising spent
+
+**Descriptive statistics on revenue per invested advertising dollar:** <br />
+Bargain keywords:
+```{r}
+stat.desc(AFc_bargainkeywords$revenue_per_1_dollar_spent)
+```
+
+Non-bargain keywords:
+```{r}
+stat.desc(AFc_nonbargainkeywords$revenue_per_1_dollar_spent)
+```
+Analysis shows that mean revenue generated from one advertising dollar for bargain-focused keywords is higher at \$58.71 compared to $53.63 for non-bargain-focused keywords. However, when the standard deviation is considered, the difference between the two numbers is not statistically significant.
+
+##### 2.2 Analyze average position
+
+**Descriptive statistics on average position:** <br />
+Bargain  keywords:
+```{r}
+stat.desc(AFc_bargainkeywords$avg_pos)
+```
+
+Non-bargain keywords:
+```{r}
+stat.desc(AFc_nonbargainkeywords$avg_pos)
+```
+Analysis shows that the average position on search engine ads of bargain keywords is worse (higher) at 2.07 compared to 1.89 for non-bargain keywords. Results are statistically significant!
+
+
+#### 2.3. Performance on click-through rate [%]
+
+**Descriptive statistics on click-through rate [%]:** <br />
+Bargain keywords:
+```{r}
+stat.desc(AFc_bargainkeywords$engine_click_thru_perc)
+```
+
+Non-bargain keywords:
+```{r}
+stat.desc(AFc_nonbargainkeywords$engine_click_thru_perc)
+```
+Analysis shows that the average click-through rate of bargain keywords at 16.76% is higher than the 9.68% click-through rate of non-bargain keywords. The difference is statistically significant. The business insight is that users click on advertising that show some kind of discount or sale. However, as the previous results show, the users do not necessrily buy more when bargain keywords are used. 
+
+
+#### 2.4. Performance on transaction conversion rate [%]
+
+**Descriptive statistics on transaction conversion rate [%]:** <br />
+Bargain keywords:
+```{r}
+stat.desc(AFc_bargainkeywords$trans_conv_perc)
+```
+
+Non-bargain keywords:
+```{r}
+stat.desc(AFc_nonbargainkeywords$trans_conv_perc)
+```
+Analysis shows that the average transaction conversion rate of bargain keywords at 0.46% is lower than the 0.60% transaction conversion rate of non-bargain keywords. However, when the standard deviation is considered, the difference between the two percentages is not statistically significant. This means that the discount deals that are advertised with bargain keywords do not as often result in a ticket purchase. 
+
+***
+
+# 4. Prescriptive statistics
+
+#### 1. Preparing data
+```{r}
+AFc$publisher_name  <- as.numeric(as.factor(AFc$publisher_name))
+#AFc$match_type  <- as.numeric(as.factor(AFc$match_type))
+#AFc$campaign  <- as.numeric(as.factor(AFc$campaign))
+#AFc$keyword_group  <- as.numeric(as.factor(AFc$keyword_group))
+#AFc$bid_strategy  <- as.numeric(as.factor(AFc$bid_strategy))
+
+
+AFc$publisher_name <- as.factor(AFc$publisher_name)
+AFc$match_type <- as.factor(AFc$match_type)
+AFc$campaign <- as.factor(AFc$campaign)
+AFc$bid_strategy <- as.factor(AFc$bid_strategy)
+
+```
+
+Preparing new binary variable (logical) for classification
+```{r error = TRUE}
+AFc$revenue_per_1_dollar_spent_binary <- FALSE 
+
+for (r in 1:nrow(AFc)){
+  if((AFc[r, "revenue_per_1_dollar_spent"] > median(AFc$revenue_per_1_dollar_spent, na.rm = TRUE)) == TRUE){
+   AFc[r, "revenue_per_1_dollar_spent_binary"] <- TRUE} else {
+     AFc[r, "revenue_per_1_dollar_spent_binary"] <- FALSE
+   }
+  }
+```
+
+#### 2. Separating training & testing data 
+Using simple random sampling. Setting seed to get reproducible results
+```{r}
+set.seed(2)
+training_index <- sample(1:nrow(AFc), 0.8*nrow(AFc))
+training_data <- AFc[training_index,]
+testing_data <- AFc[-training_index, ]
+```
+
+#### 3. Building a model
+
+##### 3.1. Base model
+Using only variables that Air France can directly influence (e.g. publisher_name, search_engine_bid). And not using variables that cannot be directly influenced (e.g. clicks, impressions)
+```{r}
+my_model0 <- lm(revenue_per_1_dollar_spent ~ publisher_name + match_type + campaign + keyword_group + bid_strategy + search_engine_bid + branded_keyword + ticket_keyword + destination_keyword + bargain_keyword , data = training_data)
+
+summary(my_model0)
+```
+Base model gives indications about which variables to consider for upcoming models.
+
+##### 3.2. Model 1
+Skip campaign and keyword_group (compared to base model)
+```{r}
+
+my_model1 <- lm(revenue_per_1_dollar_spent ~ publisher_name + match_type + bid_strategy + search_engine_bid + branded_keyword + ticket_keyword + destination_keyword + bargain_keyword , data = training_data)
+
+summary(my_model1)
+```
+The regression reveals that MSN US, Overture Global, Overture US should be avoided. Additionally, returns are better when broad match_types are avoided and standard match_types are used more often. The use of branded keywords generates on average \$36.10 more revenue than unbranded keywords. The same applies for bargain keywords - on average $33.75 higher revenue as a result of bargain terms in the keywords. 
+
+
+##### 3.3. Model 2
+Skip keyword_group (compared to base model)
+```{r}
+my_model2 <- lm(revenue_per_1_dollar_spent ~ publisher_name + match_type + campaign + search_engine_bid + branded_keyword + ticket_keyword + destination_keyword + bargain_keyword , data = training_data)
+
+summary(my_model2)
+```
+Increase the use of MSN Global. Stop the campaigns: "Air France Branded", "French Destination", "Geo Targeted Chicago", "Geo Targeted New York", "Google_Yearlong 2006" and "Paris & France Terms" (because negative sign in front of coefficient). Focus on the campaign "Geo Targeted DC".
+
+##### 3.4. Model 3
+Skip bid_strategy (compared to base model) and use classification instead of regression
+Classification is performed on revenue_per_1_dollar_spent_binary (which represents whether a keyword (observation) performs better or worse than the median of all observations)
+```{r error = FALSE}
+my_model3 <- glm(revenue_per_1_dollar_spent_binary ~ publisher_name + search_engine_bid + destination_keyword + bargain_keyword , data = training_data, family = "binomial")
+
+summary(my_model3)
+```
+Analysis reveals to use less services of publisher_name MSN Global, Overture Global, Overture US and avoid desitnation keywords as well as bargain keywords. 
+
+
+Analyize coefficients for influence on business success
+```{r}
+exp(-0.78449)-1
+```
+A one unit increase on pubulisher_name 2 (= using publisher_name 2) results in a 54.36% decrease in odds of business success. 
+
+```{r}
+exp(-0.95329)-1
+```
+A one unit increase on destination keywords (= using destination keywords) results in a 61.45% decrease in odds of business success. 
+
+```{r}
+exp(-0.95152)-1
+```
+A one unit increase on bargain keywords (= using bargain keywords) results in a 61.38% decrease in odds of business success. 
+
+###### Model 3 Visualization
+
+```{r}
+#my_model3$xlevels[["publisher_name"]] <- union(my_model3$xlevels[["publisher_name"]], levels(testing_data$match_type))
+my_model3$xlevels[["match_type"]] <- union(my_model3$xlevels[["match_type"]], levels(testing_data$match_type))
+my_model3$xlevels[["campaign"]] <- union(my_model3$xlevels[["campaign"]], levels(AFc$campaign))
+my_model3$xlevels[["bid_strategy"]] <- union(my_model3$xlevels[["bid_strategy"]], levels(AFc$campaign))
+
+my_predict3 <- predict(my_model3, testing_data, level = 10 ,type = "response")
+
+pred_val_logit <- prediction(my_predict3, testing_data$revenue_per_1_dollar_spent_binary)
+
+perf_logit <- performance(pred_val_logit, "tpr", "fpr")
+
+plot(perf_logit, color = "blue")
+
+```
+The curve is further to the top left than the diagonal, which indicates that the model has some predictive power. 
+
+###### Model 3 Confusion Matrix
+
+```{r error = TRUE}
+confusionMatrix(data = as.factor(as.numeric(my_predict3 > 0.5)),
+                reference = as.factor(as.numeric(testing_data$revenue_per_1_dollar_spent_binary)))
+```
+The accuracy of 95.68% of the model seems to be quite convincing. 
+
+***
+# Appendix: Comparison Kayak data
+Kayak data is given for one week. However, as there is no indication about the time frame of collection of the other data, all metrics that are time-bound are omitted. 
+
+#### 1. Load data and select only relevant part of it
+```{r error=FALSE, warning=FALSE}
+library(readxl)
+kayak <- read_excel("Air France Case Spreadsheet Supplement.xls", 
+                                                     sheet = "Kayak")
+#View(kayak)
+
+colnames(kayak) <- kayak[2,]
+kayak <- kayak[3,]
+for(k in 2:7){
+  kayak[k] <- as.numeric(kayak[k])
+}
+```
+
+#### 2. Massage the data by calculating comparable metrics
+```{r}
+kayak[8] <- kayak[6] / kayak[2]
+kayak[9] <- kayak[6] / kayak[3]
+```
+
+#### 3. Compare the data to other channels
+```{r}
+kayak_comparison <- data.frame(metric=character(),
+                               revenue_per_click=numeric(),
+                               revenue_per_1_dollar_spent=numeric(), 
+                               stringsAsFactors=FALSE) 
+
+kayak_comparison[1,1] <- "Revenue per Click"
+kayak_comparison[2,1] <- "Revenue per 1 Dollar Spent"
+kayak_comparison[1,2] <- round(kayak[8], digits = 2)
+kayak_comparison[2,2] <- round(kayak[9], digits = 2)
+kayak_comparison[1,3] <- round(mean(AFc$revenue[-338] / AFc$clicks[-338], na.rm = TRUE), digits = 2)
+kayak_comparison[2,3] <- round(mean(AFc$revenue_per_1_dollar_spent, na.rm = TRUE), digits = 2)
+colnames(kayak_comparison) <- c("Metric", "Kayak", "Other channels")
+
+kayak_comparison
+```
+
+The table shows that Kayak performs much better on revenue_per_click but only slightly better on revenue_per_1_dollar_spent. It takes less clicks on Kayak to get the same amount of revenue (presumably because users have intention to travel), but each click (that leads to revenue for Air France) is more expensive at Kayak (because it's targeted towards airlines selling tickets). Therefore, the recommendation is to use the services of Kayak more.
+
+
