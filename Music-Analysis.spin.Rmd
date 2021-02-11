@@ -1,0 +1,241 @@
+---
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r }
+library(geniusr)
+library(tidyverse)
+library(tidytext)
+#install.packages("wordcloud2")
+library(wordcloud2)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+#install.packages("stopwords")
+#install.packages("slam")
+library(scales)
+library(slam)
+library(stopwords)
+library(ggplot2)
+
+genius_token()
+
+#############GNR#################
+#################################
+#search songs to find the correct path
+welcome <- search_song("welcome to the jungle")
+#get the album for the specific song
+album1 <- get_song_df(53860)
+#album id 11175
+guns_n_roses <- scrape_tracklist(11175)
+#get the lyrics for the whole album
+appetite_lyrics <- map_df(guns_n_roses$song_lyrics_url, scrape_lyrics_url)
+#tokenization of lyrics for the album
+appetite_words <- appetite_lyrics %>%
+                    unnest_tokens(word, line) %>%
+                    select(song_name, word)
+appetite_words
+
+############METALLICA############
+#################################
+memory <- search_song("memory remains")
+#get the album for the specific song
+album2 <- get_song_df(307244)
+#album id 40839
+metallica <- scrape_tracklist(40839)
+#get the lyrics for the whole album
+reload_lyrics <- map_df(metallica$song_lyrics_url, scrape_lyrics_url)
+#tokenization of lyrics for the album
+reload_words <- reload_lyrics %>%
+                  unnest_tokens(word, line) %>%
+                  select(song_name, word)
+reload_words
+
+###########MOTLEY_CRUE###########
+#################################
+girls <- search_song("girls girls girls")
+#get the album for the specific song
+album3 <- get_song_df(108070)
+#album id 247526
+motley_crue <- scrape_tracklist(247526)
+#get the lyrics for the whole album
+girls_lyrics <- map_df(motley_crue$song_lyrics_url, scrape_lyrics_url)
+#tokenization of lyrics for the album
+girls_words <- girls_lyrics %>%
+                unnest_tokens(word, line) %>%
+                select(song_name, word)
+girls_words
+
+#tokenized dataframes
+#appetite_words
+#reload_words
+#girls_words
+
+#######Taking out the stop words from the data#############
+tidy_appetite <- appetite_words %>%
+                  anti_join(stop_words)
+
+tidy_reload <- reload_words %>%
+                anti_join(stop_words) 
+
+tidy_girls <- girls_words %>%
+               anti_join(stop_words) 
+
+#tidy_appetite
+#tidy_reload
+#tidy_girls
+
+frequency <- bind_rows(mutate(tidy_appetite, band = "Guns N Roses"),
+                       mutate(tidy_reload, band = "Metallica"),
+                       mutate(tidy_girls, band = "Motley Crue"))%>%#closing bind_rows
+  mutate(word=str_extract(word, "[a-z']+")) %>%
+  count(band, word) %>%
+  group_by(band) %>%
+  mutate(proportion = n/sum(n))%>%
+  select(-n) %>%
+  spread(band, proportion) %>%
+  gather(band, proportion, `Metallica`, `Motley Crue`)
+
+bands_freq <- ggplot(frequency, aes(x=proportion, y=`Guns N Roses`, 
+                      color = abs(`Guns N Roses`- proportion)))+
+  geom_abline(color="grey40", lty=2)+
+  geom_jitter(alpha=.1, size=2.5, width=0.3, height=0.3)+
+  geom_text(aes(label=word), check_overlap = TRUE, vjust=1.5) +
+  scale_x_log10(labels = percent_format())+
+  scale_y_log10(labels= percent_format())+
+  scale_color_gradient(limits = c(0,0.001), low = "gray10", high = "gray75")+
+  facet_wrap(~band, ncol=2)+
+  theme(legend.position = "none")+
+  labs(y= "Guns N Roses", x=NULL)
+
+bands_freq
+#trying to find out the resemblance in different bands' lyrics
+cor.test(data=frequency[frequency$band == "Motley Crue",],
+         ~proportion + `Guns N Roses`)
+#0.204 correlation
+cor.test(data=frequency[frequency$band == "Metallica",],
+         ~proportion + `Guns N Roses`)
+#0.422 correlation
+
+#after correlation we can say that Metallica is more similar to
+#Guns and roses than Motley Crue in terms of lyrics.
+
+###########Sentimental Analysis#############
+#to undertsand the emoptions behind the lyrics.
+#or if two album has similar emotions in it
+
+nrc <- get_sentiments(lexicon = "nrc")
+#nrc
+
+#nrc sentiment analysis for GNR
+tidy_appetite %>% 
+  inner_join(nrc) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(sentiment), scales = "free") +
+  labs(y = "Guns N' Roses Appetite For Destruction: Words that contribute the most to each sentiment",
+       x = NULL) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  theme_minimal()
+#nrc sentiment analysis for Metallica
+tidy_reload %>% 
+  inner_join(nrc) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(sentiment), scales = "free") +
+  labs(y = "Metallica Reload: Words that contribute the most to each sentiment",
+       x = NULL) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  theme_minimal()
+#nrc sentiment analysis for Motley Crue
+tidy_girls %>% 
+  inner_join(nrc) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(vars(sentiment), scales = "free") +
+  labs(y = "Motley Crue Girls, Girls, Girls: Words that contribute the most to each sentiment",
+       x = NULL) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+  theme_minimal()
+
+appetite_wordcloud <- tidy_appetite %>%
+  count(word, sort = T) %>%
+  #filter(n>5) %>%
+  top_n(100) %>%
+  wordcloud2(size = 0.5)
+
+reload_wordcloud <- tidy_reload %>%
+  count(word, sort = T) %>%
+  #filter(n>5) %>%
+  top_n(100) %>%
+  wordcloud2(size = 0.5)
+
+girls_wordcloud <- tidy_girls %>%
+  count(word, sort = T) %>%
+  #filter(n>5) %>%
+  top_n(100) %>%
+  wordcloud2(size = 0.5)
+
+appetite_wordcloud
+reload_wordcloud
+girls_wordcloud
+
+appetite_tri <- appetite_lyrics %>%
+                  unnest_tokens(words, line, token = "ngrams", n = 3) %>%
+                  filter(!is.na(words)) %>%
+                  separate(words, c("word1", "word2", "word3"), sep=" ") %>%
+                  filter(!word1 %in% stop_words$word) %>%
+                  filter(!word2 %in% stop_words$word) %>%
+                  filter(!word3 %in% stop_words$word) %>%
+                  count(word1, word2, word3, sort = T)
+appetite_tri
+
+reload_tri <- reload_lyrics %>%
+                unnest_tokens(words, line, token = "ngrams", n = 3) %>%
+                filter(!is.na(words)) %>%
+                separate(words, c("word1", "word2", "word3"), sep=" ") %>%
+                filter(!word1 %in% stop_words$word) %>%
+                filter(!word2 %in% stop_words$word) %>%
+                filter(!word3 %in% stop_words$word) %>%
+                count(word1, word2, word3, sort = T)
+reload_tri
+
+girls_tri <- girls_lyrics %>%
+                unnest_tokens(words, line, token = "ngrams", n = 3) %>%
+                filter(!is.na(words)) %>%
+                separate(words, c("word1", "word2", "word3"), sep=" ") %>%
+                filter(!word1 %in% stop_words$word) %>%
+                filter(!word2 %in% stop_words$word) %>%
+                filter(!word3 %in% stop_words$word) %>%
+                count(word1, word2, word3, sort = T)
+girls_tri
+```
+
+
+
+---
+title: Music-Analysis.R
+author: cbz
+date: '2021-02-10'
+
+---
